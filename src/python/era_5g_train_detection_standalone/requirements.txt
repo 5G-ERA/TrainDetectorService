@@ -3,6 +3,7 @@ opencv_python==4.6.*
 
 filterpy==1.4.*
 
+python-socketio~=5.7.2
 flask_socketio==5.3.*
 flask==2.2.*
 flask_session==0.4.*
