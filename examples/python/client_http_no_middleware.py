@@ -19,6 +19,8 @@ from era_5g_client.exceptions import FailedToConnect
 
 from era_5g_client.dataclasses import NetAppLocation
 
+from utils.rate_timer import RateTimer
+
 image_storage: Dict[str, np.ndarray] = dict()
 results_storage: Queue[Dict[str, Any]] = Queue()
 stopped = False
@@ -136,6 +138,11 @@ def main() -> None:
             if not cap.isOpened():
                 raise Exception("Cannot open video file")
 
+        # create timer to ensure required fps speed of the sending loop
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        logging.info(f"Using RateTimer with {fps} FPS.")
+        rate_timer = RateTimer(rate=fps, iteration_miss_warning=True)
+
         while not stopped:
             ret, frame = cap.read()
             timestamp = time.time_ns()
@@ -144,6 +151,8 @@ def main() -> None:
             resized = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
             timestamp_str = str(timestamp)
             image_storage[timestamp_str] = resized
+
+            rate_timer.sleep()  # sleep until next frame should be sent (with given fps)
             client.send_image_http(resized, timestamp_str, 5)
 
     except FailedToConnect as ex:
