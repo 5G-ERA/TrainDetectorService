@@ -10,6 +10,7 @@ import flask_socketio
 from flask import Flask, Response, request, session
 from flask_session import Session
 import logging
+import time
 
 from era_5g_interface.task_handler_gstreamer_internal_q import \
     TaskHandlerGstreamerInternalQ, TaskHandlerGstreamer
@@ -108,6 +109,9 @@ def image_callback_http():
     """
     Allows to receive jpg-encoded image using the HTTP transport
     """
+
+    recv_timestamp = time.time_ns()
+
     if 'registered' not in session:
         return Response('Need to call /register first.', 401)
 
@@ -130,6 +134,7 @@ def image_callback_http():
             {"sid": sid,
              "websocket_id": task.websocket_id,
              "timestamp": timestamps[index],
+             "recv_timestamp": recv_timestamp,
              "decoded": False},
             nparr
             )
@@ -169,6 +174,8 @@ def image_callback_websocket(data: dict):
             without registering first or frame was not passed in correct format.
     """
     logging.debug("A frame recieved using ws")
+    recv_timestamp = time.time_ns()
+    
     if 'timestamp' in data:
         timestamp = data['timestamp']
     else:
@@ -202,6 +209,7 @@ def image_callback_websocket(data: dict):
             {"sid": session.sid,
              "websocket_id": task.websocket_id,
              "timestamp": timestamp,
+             "recv_timestamp": recv_timestamp,
              "decoded": False},
             np.frombuffer(frame, dtype=np.uint8)
             )

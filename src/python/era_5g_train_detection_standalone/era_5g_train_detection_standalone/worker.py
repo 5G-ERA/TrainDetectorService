@@ -122,9 +122,13 @@ class TrainDetectorWorker(Thread):
 
         """
 
+        send_timestamp = time.time_ns()
+
         # Send only the necessary data about movements (no images, etc.),
         # add timestamp to the results
         r = {"timestamp": metadata["timestamp"],
+             "recv_timestamp": metadata["recv_timestamp"],
+             "send_timestamp": send_timestamp,
              "movements": data["movements"], # list(dict("bbox": bbox, "moving": 0/1/-1))
                 # bbox is: x1, y1, x2, y2 (top-left bottom-right corners)
             }
