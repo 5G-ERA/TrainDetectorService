@@ -9,5 +9,5 @@ flask==2.2.*
 flask_session==0.4.*
 
 era_5g_client==0.2.0
-era_5g_interface==0.1.0
+era_5g_interface==0.2.0
 
