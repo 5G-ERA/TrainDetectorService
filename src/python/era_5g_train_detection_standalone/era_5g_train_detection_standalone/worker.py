@@ -75,7 +75,7 @@ class TrainDetectorWorker(Thread):
         while not self.stop_event.is_set():
             # Get image and metadata from input queue
             try:
-                queue_data = self.image_queue.get(block=True)
+                queue_data = self.image_queue.get(block=True, timeout=1)
                 # TODO: check for reset token (to enable clearing of internal state)
                 metadata, image = queue_data
             except Empty:
