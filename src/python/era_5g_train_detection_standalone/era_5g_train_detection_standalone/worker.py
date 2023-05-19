@@ -24,7 +24,7 @@ class TrainDetectorWorker(Thread):
 
     Worker reads data from passed queue, performs object detection and
     further processing to determine if objects are moving and returns 
-    results using the flask app. 
+    the results.
     """
 
     def __init__(self, image_queue: Queue, app, sort_tracker_params=None, optical_flow_params= None, **kw):
@@ -108,7 +108,8 @@ class TrainDetectorWorker(Thread):
             if DEBUG_DRAW_DETECTIONS:
                 # Draw the detections and movements 
                 out_img = data["output_bgr_image"]
-                cv2.imshow("Detections", out_img)
+                window_name = f"Detections {self.ident}"
+                cv2.imshow(window_name, out_img)
                 cv2.waitKey(1)
 
             self.publish_results(data, metadata)  

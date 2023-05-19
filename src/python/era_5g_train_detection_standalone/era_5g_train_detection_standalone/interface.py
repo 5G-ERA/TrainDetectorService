@@ -7,11 +7,16 @@ import argparse
 import os
 import numpy as np
 import flask_socketio
-from flask import Flask, Response, request, session
-from flask_session import Session
 import logging
 import time
 
+from dataclasses import dataclass
+from flask import Flask, Response, request, session
+from flask_session import Session
+from typing import Dict
+
+from era_5g_train_detection_standalone.worker import TrainDetectorWorker
+from era_5g_interface.task_handler import TaskHandler
 from era_5g_interface.task_handler_gstreamer_internal_q import \
     TaskHandlerGstreamerInternalQ, TaskHandlerGstreamer
 from era_5g_interface.task_handler_internal_q import TaskHandlerInternalQ
@@ -32,15 +37,13 @@ socketio = flask_socketio.SocketIO(app, manage_session=False, async_mode='thread
 # could be changed using the script arguments
 free_ports = [5001, 5002, 5003]
 
+@dataclass
+class TaskAndWorker:
+    task: TaskHandler
+    worker: TrainDetectorWorker
+
 # list of registered tasks
-tasks = dict()
-
-# queue with received images
-# TODO: adjust the queue length
-image_queue = Queue(30)
-
-# the image detector to be used
-detector_thread = None
+tasks: Dict[str, TaskAndWorker] = dict()
 
 
 class ArgFormatError(Exception):
@@ -66,6 +69,9 @@ def register():
 
     session['registered'] = True
 
+    # new queue for received images
+    image_queue = Queue(30)
+
     # select the appropriate task handler, depends on whether the client wants to use
     # gstreamer to pass the images or not 
     if gstreamer:
@@ -74,7 +80,12 @@ def register():
     else:
         task = TaskHandlerInternalQ(session.sid, image_queue, daemon=True)
 
-    tasks[session.sid] = task
+    # create worker and run it as thread, listening to image_queue
+    worker = TrainDetectorWorker(image_queue, app, daemon=True)
+    worker.start()
+
+    tasks[session.sid] = TaskAndWorker(task, worker)
+
     print(f"Client registered: {session.sid}")
     if gstreamer:
         return {"port": port}, 200
@@ -94,8 +105,11 @@ def unregister():
     # print(f"unregister {session.sid} {session}")
     # print(f"{request}")
     if session.pop('registered', None):
-        task = tasks.pop(session.sid)
+        task_and_worker = tasks.pop(session.sid)
+        task = task_and_worker.task
+        worker = task_and_worker.worker
         task.stop()
+        worker.stop()
         flask_socketio.disconnect(task.websocket_id, namespace="/results")
         if isinstance(task, TaskHandlerGstreamer):
             free_ports.append(task.port)
@@ -116,7 +130,7 @@ def image_callback_http():
         return Response('Need to call /register first.', 401)
 
     sid = session.sid
-    task = tasks[sid]
+    task = tasks[sid].task
 
     if "timestamps[]" in request.args:
         timestamps = request.args.to_dict(flat=False)['timestamps[]']
@@ -202,7 +216,9 @@ def image_callback_websocket(data: dict):
             )
         return
 
-    task = tasks[session.sid]
+    sid = session.sid
+    task = tasks[sid].task
+
     try:
         frame = base64.b64decode(data["frame"])
         task.store_image(
@@ -266,8 +282,9 @@ def connect_results(auth):
 
     sid = request.sid
     print(f"Client connected: session id: {session.sid}, websocket id: {sid}")
-    tasks[session.sid].websocket_id = sid
-    tasks[session.sid].start()
+    tasks[session.sid].task.websocket_id = sid
+    if isinstance(tasks[session.sid].task, TaskHandlerGstreamer):
+        tasks[session.sid].task.start()
     # TODO: Check task is running, Gstreamer capture can failed
     flask_socketio.send("You are connected", namespace='/results', to=sid)
 
@@ -304,6 +321,8 @@ def get_ports_range(ports_range) -> list:
 
 
 def main(args=None):
+    logging.getLogger().setLevel(logging.DEBUG)
+
     parser = argparse.ArgumentParser(description='Standalone variant of object detection NetApp')
     # TODO: in future versions, the ports should be specified as list instead of range, preferably
     #       using env variable, for compatibility with middleware
@@ -319,28 +338,14 @@ def main(args=None):
         help="Select detector. Available options are opencv, mmdetection, fps. Default is fps."
         )
     args = parser.parse_args()
-    global free_ports, detector_thread
+    global free_ports
     try:
         free_ports = get_ports_range(args.ports)
     except ArgFormatError:
-        print("Port range specified in wrong format. The correct format is port_start:port_end, e.g. 5001:5003.")
+        logging.error("Port range specified in wrong format. The correct format is port_start:port_end, e.g. 5001:5003.")
         exit()
-
-    logging.getLogger().setLevel(logging.DEBUG)
-
-    # Creates detector and runs it as thread, listening to image_queue
-    from era_5g_train_detection_standalone.worker import TrainDetectorWorker
-    detector_thread = TrainDetectorWorker(image_queue, app, daemon=True)
-    detector_thread.start()
     
-    print("Train detector started.")
-
-    # Estimate new queue size based on maximum latency
-    """avg_latency = latency_measurements.get_avg_latency() # obtained from detector init warmup
-    if avg_latency != 0:  # warmup can be skipped
-        new_queue_size = int(max_latency / avg_latency)
-        image_queue = Queue(new_queue_size)
-        detector_thread.input_queue = image_queue"""
+    logging.info("Starting Train Detector Service interface.")
 
     # runs the flask server
     # allow_unsafe_werkzeug needs to be true to run inside the docker
