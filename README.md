@@ -1,9 +1,9 @@
 
 # 5G-Era Train Detector Service
 
-This repository cointains a service for detecting train movement in a video stream from a camera. It is intended to be used on autonomous or semi-autonomous robotic vehicle that operates inside an industiral area with a railway branch line (industrial spur). 
+This repository contains a service for detecting train movement in a video stream from a camera. It is intended to be used on autonomous or semi-autonomous robotic vehicle that operates inside an industrial area with a railway branch line (industrial spur). 
 
-The robot can utilize this service each time it is about to cross a railway track on its route. Firstly, the robot must stop before the railway track, in order to allow the motion of the train to be distinguished from the movement of the video stream that is induced by the robot itself. Subsequently, Train Detector Sevice is called and it searches for any trains in the camera view and evaluates whether they are still or moving. This information can then be used by the robot to decide when it is safe to proceed with crossing the track.
+The robot can utilize this service each time it is about to cross a railway track on its route. Firstly, the robot must stop before the railway track, in order to allow the motion of the train to be distinguished from the movement of the video stream that is induced by the robot itself. Subsequently, Train Detector Service is called and it searches for any trains in the camera view and evaluates whether they are still or moving. This information can then be used by the robot to decide when it is safe to proceed with crossing the track.
 
 
 ### Local Installation
