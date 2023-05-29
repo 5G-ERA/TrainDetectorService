@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 import time
 
+from era_5g_interface.control_command import ControlCommand, ControlCmdType
+
 from era_5g_train_detection_standalone.modules.mm_detector import MMDetector
 from era_5g_train_detection_standalone.modules.detection_processing import DetectionProcessing
 
@@ -76,7 +78,16 @@ class TrainDetectorWorker(Thread):
             # Get image and metadata from input queue
             try:
                 queue_data = self.image_queue.get(block=True, timeout=1)
-                # TODO: check for reset token (to enable clearing of internal state)
+                
+                # Check for ControlCommand token (enables clearing of internal state)
+                if isinstance(queue_data, ControlCommand):
+                    if queue_data.cmd_type == ControlCmdType.RESET_STATE:
+                        self.detection_processing.clear_tracks()
+                        logging.debug("Internal state cleared.")
+                    else:
+                        logging.warning(f"Got control command with type {queue_data.cmd_type}, which is not applicable.")
+                    continue
+
                 metadata, image = queue_data
             except Empty:
                 continue

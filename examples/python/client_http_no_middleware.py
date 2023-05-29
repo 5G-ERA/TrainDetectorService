@@ -22,6 +22,8 @@ from era_5g_client.exceptions import FailedToConnect
 
 from era_5g_client.dataclasses import NetAppLocation
 
+from era_5g_interface.control_command import ControlCmdType, ControlCommand
+
 from utils.rate_timer import RateTimer
 from utils.results_viewer import ResultsViewer
 
@@ -107,7 +109,7 @@ def main() -> None:
         # creates an instance of NetApp client with results callback
         client = NetAppClientBase(get_results)
         # register with an ad-hoc deployed NetApp
-        client.register(NetAppLocation(NETAPP_ADDRESS, NETAPP_PORT), ws_data=True)
+        client.register(NetAppLocation(NETAPP_ADDRESS, NETAPP_PORT), ws_data=True, use_control_cmds=True)
         if FROM_SOURCE:
             # creates a video capture to pass images to the NetApp either from webcam ...
             cap = cv2.VideoCapture(0)
@@ -136,7 +138,12 @@ def main() -> None:
 
             rate_timer.sleep()  # sleep until next frame should be sent (with given fps)
             client.send_image_ws(resized, timestamp_str)
-        
+
+        # Send command to reset internal state of the NetApp
+        control_cmd = ControlCommand(ControlCmdType.RESET_STATE, clear_queue=True)
+        client.send_control_command(control_cmd)
+        time.sleep(2)
+
     except FailedToConnect as ex:
         print(f"Failed to connect to server ({ex})")
     except KeyboardInterrupt:

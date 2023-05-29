@@ -21,6 +21,8 @@ from era_5g_interface.task_handler_gstreamer_internal_q import \
     TaskHandlerGstreamerInternalQ, TaskHandlerGstreamer
 from era_5g_interface.task_handler_internal_q import TaskHandlerInternalQ
 
+from era_5g_interface.control_command import ControlCommand
+
 # port of the netapp's server
 NETAPP_PORT = os.getenv("NETAPP_PORT", 5896)
 
@@ -289,6 +291,58 @@ def connect_results(auth):
     flask_socketio.send("You are connected", namespace='/results', to=sid)
 
 
+@socketio.on('connect', namespace='/control')
+def connect_control(auth):
+    """_summary_
+    Creates a websocket connection to the client for passing control commands.
+
+    Raises:
+        ConnectionRefusedError: Raised when attempt for connection were made
+            without registering first.
+    """
+
+    if 'registered' not in session:
+        raise ConnectionRefusedError('Need to call /register first.')
+
+    print(f"Connected control. Session id: {session.sid}, ws_sid: {request.sid}")
+
+    flask_socketio.send("you are connected", namespace='/control', to=request.sid)
+
+
+@socketio.on('command', namespace='/control') 
+def control_command_callback_websocket(data): 
+    """_summary_
+    Pass control command to the worker to change its internal state.
+
+    Args:
+        data (dict): Json data with the control command
+    """
+
+    if 'registered' not in session:
+        logging.error(f"Non-registered client tried to send control data.")
+        flask_socketio.emit(
+            "control_data_error",
+            {"error": "Need to call /register first."},
+            namespace='/control',
+            to=request.sid
+            )
+
+    logging.debug(f"Client with task id: {session.sid} sent control data {data}")
+
+    task = tasks[session.sid].task
+
+    try:
+        control_command = ControlCommand(**data)
+
+        if control_command.clear_queue:
+            task.clear_storage()
+
+        task.store_control_data(control_command)
+
+    except:
+        pass # Send error information to client
+
+
 @socketio.on('disconnect', namespace='/results')
 def disconnect_results():
     print(f"Client disconnected from /results namespace: session id: {session.sid}, websocket id: {request.sid}")
@@ -297,6 +351,11 @@ def disconnect_results():
 @socketio.on('disconnect', namespace='/data')
 def disconnect_data():
     print(f"Client disconnected from /data namespace: session id: {session.sid}, websocket id: {request.sid}")
+
+
+@socketio.on('disconnect', namespace='/control')
+def disconnect_control():
+    print(f"Client disconnected from /control namespace: session id: {session.sid}, websocket id: {request.sid}")
 
 
 def get_ports_range(ports_range) -> list:
