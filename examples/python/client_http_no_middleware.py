@@ -22,9 +22,9 @@ from era_5g_client.exceptions import FailedToConnect
 
 from era_5g_client.dataclasses import NetAppLocation
 
-from era_5g_interface.control_command import ControlCmdType, ControlCommand
+from era_5g_interface.dataclasses.control_command import ControlCmdType, ControlCommand
 
-from utils.rate_timer import RateTimer
+from era_5g_interface.utils.rate_timer import RateTimer
 from utils.results_viewer import ResultsViewer
 
 

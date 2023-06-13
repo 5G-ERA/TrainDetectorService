@@ -21,7 +21,7 @@ from era_5g_interface.task_handler_gstreamer_internal_q import \
     TaskHandlerGstreamerInternalQ, TaskHandlerGstreamer
 from era_5g_interface.task_handler_internal_q import TaskHandlerInternalQ
 
-from era_5g_interface.control_command import ControlCommand
+from era_5g_interface.dataclasses.control_command import ControlCommand
 
 # port of the netapp's server
 NETAPP_PORT = os.getenv("NETAPP_PORT", 5896)

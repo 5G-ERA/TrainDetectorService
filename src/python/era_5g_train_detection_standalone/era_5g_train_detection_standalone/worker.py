@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import time
 
-from era_5g_interface.control_command import ControlCommand, ControlCmdType
+from era_5g_interface.dataclasses.control_command import ControlCommand, ControlCmdType
 
 from era_5g_train_detection_standalone.modules.mm_detector import MMDetector
 from era_5g_train_detection_standalone.modules.detection_processing import DetectionProcessing
