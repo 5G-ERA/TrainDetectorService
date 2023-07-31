@@ -1,183 +1,102 @@
 import base64
-import binascii
-import secrets
-from queue import Queue
-import cv2
 import argparse
+import binascii
+import cv2
 import os
 import numpy as np
-import flask_socketio
 import logging
 import time
+import socketio
+import threading
 
-from dataclasses import dataclass
-from flask import Flask, Response, request, session
-from flask_session import Session
+from queue import Queue
 from typing import Dict
+
+from flask import Flask
 
 from era_5g_train_detection_standalone.worker import TrainDetectorWorker
 from era_5g_interface.task_handler import TaskHandler
-from era_5g_interface.task_handler_gstreamer_internal_q import \
-    TaskHandlerGstreamerInternalQ, TaskHandlerGstreamer
 from era_5g_interface.task_handler_internal_q import TaskHandlerInternalQ
 
-from era_5g_interface.dataclasses.control_command import ControlCommand
+from era_5g_interface.h264_decoder import H264Decoder
+from era_5g_interface.interface_helpers import HeartBeatSender
+from era_5g_interface.interface_helpers import MIDDLEWARE_REPORT_INTERVAL
+from era_5g_interface.dataclasses.control_command import ControlCommand, ControlCmdType
+
+logger = logging.getLogger("TrainDetectorService NetApp interface")
 
 # port of the netapp's server
 NETAPP_PORT = os.getenv("NETAPP_PORT", 5896)
+# input queue size
+NETAPP_INPUT_QUEUE = int(os.getenv("NETAPP_INPUT_QUEUE", 1))
 
-# flask initialization
+
+# the max_http_buffer_size parameter defines the max size of the message to be passed
+sio = socketio.Server(async_mode='threading', async_handlers=False, max_http_buffer_size=5 * (1024 ** 2))
 app = Flask(__name__)
-app.secret_key = secrets.token_hex()
-app.config['SESSION_TYPE'] = 'filesystem'
-
-# socketio initialization for sending results to the client
-Session(app)
-socketio = flask_socketio.SocketIO(app, manage_session=False, async_mode='threading')
-
-# list of available ports for gstreamer communication - they need to be exposed when running in docker / k8s
-# could be changed using the script arguments
-free_ports = [5001, 5002, 5003]
-
-@dataclass
-class TaskAndWorker:
-    task: TaskHandler
-    worker: TrainDetectorWorker
-
-# list of registered tasks
-tasks: Dict[str, TaskAndWorker] = dict()
+app.wsgi_app = socketio.WSGIApp(sio, app.wsgi_app)
 
 
-class ArgFormatError(Exception):
-    pass
+detector_threads: Dict[str, TrainDetectorWorker] = {}
+tasks: Dict[str, TaskHandler] = dict()
 
 
-@app.route('/register', methods=['POST'])
-def register():
-    """
-    Needs to be called before an attempt to open WS is made.
-
-    Returns:
-        _type_: The port used for gstreamer communication.
-    """
-    # print(f"register {session.sid} {session}")
-    args = request.get_json(silent=True)
-    gstreamer = False
-    if args:
-        gstreamer = args.get("gstreamer", False)
-
-    if gstreamer and not free_ports:
-        return {"error": "Not enough resources"}, 503
-
-    session['registered'] = True
-
-    # new queue for received images
-    image_queue = Queue(30)
-
-    # select the appropriate task handler, depends on whether the client wants to use
-    # gstreamer to pass the images or not 
-    if gstreamer:
-        port = free_ports.pop(0)
-        task = TaskHandlerGstreamerInternalQ(session.sid, port, image_queue, daemon=True)
-    else:
-        task = TaskHandlerInternalQ(session.sid, image_queue, daemon=True)
-
-    # create worker and run it as thread, listening to image_queue
-    worker = TrainDetectorWorker(image_queue, app, daemon=True)
-    worker.start()
-
-    tasks[session.sid] = TaskAndWorker(task, worker)
-
-    print(f"Client registered: {session.sid}")
-    if gstreamer:
-        return {"port": port}, 200
-    else:
-        return Response(status=204)
+heart_beat_sender = HeartBeatSender()
 
 
-@app.route('/unregister', methods=['POST'])
-def unregister():
-    """_
-    Disconnects the websocket and removes the task from the memory.
+def heart_beat_timer():
+    latencies = []
+    for worker in detector_threads.values():
+        latencies.extend(worker.latency_measurements.get_latencies())
+    avg_latency = 0
+    if len(latencies) > 0:
+        avg_latency = float(np.mean(np.array(latencies)))
 
-    Returns:
-        _type_: 204 status
-    """
-    session_id = session.sid
-    # print(f"unregister {session.sid} {session}")
-    # print(f"{request}")
-    if session.pop('registered', None):
-        task_and_worker = tasks.pop(session.sid)
-        task = task_and_worker.task
-        worker = task_and_worker.worker
-        task.stop()
-        worker.stop()
-        flask_socketio.disconnect(task.websocket_id, namespace="/results")
-        if isinstance(task, TaskHandlerGstreamer):
-            free_ports.append(task.port)
-        print(f"Client unregistered: {session_id}")
+    queue_size = 1
+    queue_occupancy = 1
 
-    return Response(status=204)
+    heart_beat_sender.send_middleware_heart_beat(
+        avg_latency=avg_latency, queue_size=queue_size, queue_occupancy=queue_occupancy, current_robot_count=len(tasks)
+    )
+    threading.Timer(MIDDLEWARE_REPORT_INTERVAL, heart_beat_timer).start()
 
 
-@app.route('/image', methods=['POST'])
-def image_callback_http():
-    """
-    Allows to receive jpg-encoded image using the HTTP transport
-    """
-
-    recv_timestamp = time.time_ns()
-
-    if 'registered' not in session:
-        return Response('Need to call /register first.', 401)
-
-    sid = session.sid
-    task = tasks[sid].task
-
-    if "timestamps[]" in request.args:
-        timestamps = request.args.to_dict(flat=False)['timestamps[]']
-    else:
-        timestamps = []
-    # convert string of image data to uint8
-    index = 0
-    for file in request.files.to_dict(flat=False)['files']:
-        # print(file)
-        nparr = np.frombuffer(file.read(), np.uint8)
-
-        # store the image to the appropriate task
-        # the image is not decoded here to make the callback as fast as possible
-        task.store_image(
-            {"sid": sid,
-             "websocket_id": task.websocket_id,
-             "timestamp": timestamps[index],
-             "recv_timestamp": recv_timestamp,
-             "decoded": False},
-            nparr
-            )
-        index += 1
-    return Response(status=204)
+heart_beat_timer()
 
 
-@socketio.on('connect', namespace='/data')
-def connect_data(auth):
-    """_summary_
-    Creates a websocket connection to the client for passing the data.
+def get_sid_of_namespace(eio_sid, namespace):
+    return sio.manager.sid_from_eio_sid(eio_sid, namespace)
 
-    Raises:
-        ConnectionRefusedError: Raised when attempt for connection were made
-            without registering first.
-    """
-
-    if 'registered' not in session:
-        raise ConnectionRefusedError('Need to call /register first.')
-
-    print(f"Connected data. Session id: {session.sid}, ws_sid: {request.sid}")
-
-    flask_socketio.send("you are connected", namespace='/data', to=request.sid)
+def get_results_sid(eio_sid):
+    return sio.manager.sid_from_eio_sid(eio_sid, "/results")
 
 
-@socketio.on('image', namespace='/data')
-def image_callback_websocket(data: dict):
+@sio.on('connect', namespace='/data')
+def connect_data(sid, environ):
+    """Creates a websocket connection to the client for passing the data."""
+
+    logger.info(f"Connected data. Session id: {sio.manager.eio_sid_from_sid(sid, '/data')}, ws_sid: {sid}")
+    sio.send("You are connected", namespace='/data', to=sid)
+
+
+@sio.on('connect', namespace='/control')
+def connect_control(sid, environ):
+    """Creates a websocket connection to the client for passing control commands."""
+
+    logger.info(f"Connected control. Session id: {sio.manager.eio_sid_from_sid(sid, '/control')}, ws_sid: {sid}")
+    sio.send("You are connected", namespace='/control', to=sid)
+
+
+@sio.on('connect', namespace='/results')
+def connect_results(sid, environ):
+    """Creates a websocket connection to the client for passing the results."""
+
+    logger.info(f"Connected results. Session id: {sio.manager.eio_sid_from_sid(sid, '/results')}, ws_sid: {sid}")
+    sio.send("You are connected", namespace='/results', to=sid)
+
+
+@sio.on('image', namespace='/data')
+def image_callback_websocket(sid, data: dict):
     """
     Allows to receive jpg-encoded image using the websocket transport
 
@@ -190,60 +109,70 @@ def image_callback_websocket(data: dict):
             without registering first or frame was not passed in correct format.
     """
     logging.debug("A frame recieved using ws")
-    recv_timestamp = time.time_ns()
+    recv_timestamp = time.perf_counter_ns()
     
     if 'timestamp' in data:
         timestamp = data['timestamp']
     else:
-        logging.debug("Timestamp not set, setting default value")
+        logger.info("Timestamp not set, setting default value")
         timestamp = 0
-    if 'registered' not in session:
-        logging.error(f"Non-registered client tried to send data")
-        flask_socketio.emit(
+
+    eio_sid = sio.manager.eio_sid_from_sid(sid, '/data')
+
+    if eio_sid not in tasks:
+        logger.error(f"Non-registered client tried to send data")
+        sio.emit(
             "image_error",
             {"timestamp": timestamp,
-             "error": "Need to call /register first."},
+             "error": "Not connected"},
             namespace='/data',
-            to=request.sid
-            )
+            to=sid
+        )
         return
+
     if 'frame' not in data:
-        logging.error(f"Data does not contain frame.")
-        flask_socketio.emit(
+        logger.error(f"Data does not contain frame.")
+        sio.emit(
             "image_error",
             {"timestamp": timestamp,
              "error": "Data does not contain frame."},
             namespace='/data',
-            to=request.sid
-            )
+            to=sid
+        )
         return
 
-    sid = session.sid
-    task = tasks[sid].task
+    task = tasks[eio_sid]
+    decoded = False
 
     try:
-        frame = base64.b64decode(data["frame"])
-        task.store_image(
-            {"sid": session.sid,
-             "websocket_id": task.websocket_id,
-             "timestamp": timestamp,
-             "recv_timestamp": recv_timestamp,
-             "decoded": False},
-            np.frombuffer(frame, dtype=np.uint8)
-            )
-    except (ValueError, binascii.Error) as error:
-        logging.error(f"Failed to decode frame data: {error}")
-        flask_socketio.emit(
+        if task.decoder:
+            image = task.decoder.decode_packet_data(data["frame"])
+            decoded = True
+        else:
+            frame = base64.b64decode(data["frame"])
+            image = np.frombuffer(frame, dtype=np.uint8)
+    except (ValueError, binascii.Error, Exception) as error:
+        logger.error(f"Failed to decode frame data: {error}")
+        sio.emit(
             "image_error",
             {"timestamp": timestamp,
              "error": f"Failed to decode frame data: {error}"},
             namespace='/data',
-            to=request.sid
-            )
+            to=sid
+        )
+    
+    task.store_image(
+        {"sid": eio_sid,
+        "timestamp": timestamp,
+        "recv_timestamp": recv_timestamp,
+        "websocket_id": get_results_sid(sio.manager.eio_sid_from_sid(sid, "/data")),
+        "decoded": decoded},
+        image
+    )
 
 
-@socketio.on('json', namespace='/data')
-def json_callback_websocket(data):
+@sio.on('json', namespace='/data')
+def json_callback_websocket(sid, data):
     """
     Allows to receive general json data using the websocket transport
 
@@ -254,162 +183,120 @@ def json_callback_websocket(data):
         ConnectionRefusedError: Raised when attempt for connection were made
             without registering first.
     """
-    if 'registered' not in session:
-        logging.error(f"Non-registered client tried to send data")
-        flask_socketio.emit(
-            "json_error",
-            {"error": "Need to call /register first."},
-            namespace='/data',
-            to=request.sid
-            )
-    logging.debug(f"client with task id: {session.sid} sent data {data}")
+    print(data)
+    logger.info(f"Client with task id: {sio.manager.eio_sid_from_sid(sid, '/data')} sent data {data}")
 
 
-@socketio.on('connect', namespace='/results')
-def connect_results(auth):
-    """
-    Creates a websocket connection to the client for passing the results.
-
-    Raises:
-        ConnectionRefusedError: Raised when attempt for connection were made
-            without registering first.
-    """
-
-    # print(f"connect {session.sid} {session}")
-    # print(f"{request.sid} {request}")
-    if 'registered' not in session:
-        # TODO: disconnect?
-        # flask_socketio.disconnect(request.sid, namespace="/results")
-        raise ConnectionRefusedError('Need to call /register first.')
-
-    sid = request.sid
-    print(f"Client connected: session id: {session.sid}, websocket id: {sid}")
-    tasks[session.sid].task.websocket_id = sid
-    if isinstance(tasks[session.sid].task, TaskHandlerGstreamer):
-        tasks[session.sid].task.start()
-    # TODO: Check task is running, Gstreamer capture can failed
-    flask_socketio.send("You are connected", namespace='/results', to=sid)
-
-
-@socketio.on('connect', namespace='/control')
-def connect_control(auth):
-    """_summary_
-    Creates a websocket connection to the client for passing control commands.
-
-    Raises:
-        ConnectionRefusedError: Raised when attempt for connection were made
-            without registering first.
-    """
-
-    if 'registered' not in session:
-        raise ConnectionRefusedError('Need to call /register first.')
-
-    print(f"Connected control. Session id: {session.sid}, ws_sid: {request.sid}")
-
-    flask_socketio.send("you are connected", namespace='/control', to=request.sid)
-
-
-@socketio.on('command', namespace='/control') 
-def control_command_callback_websocket(data): 
-    """_summary_
-    Pass control command to the worker to change its internal state.
+@sio.on('command', namespace='/control') 
+def control_command_callback_websocket(sid, data: Dict): 
+    """Pass control command to the worker to change its internal state.
 
     Args:
         data (dict): Json data with the control command
     """
 
-    if 'registered' not in session:
-        logging.error(f"Non-registered client tried to send control data.")
-        flask_socketio.emit(
-            "control_data_error",
-            {"error": "Need to call /register first."},
-            namespace='/control',
-            to=request.sid
-            )
+    eio_sid = sio.manager.eio_sid_from_sid(sid, '/control')
 
-    logging.debug(f"Client with task id: {session.sid} sent control data {data}")
-
-    task = tasks[session.sid].task
+    logger.debug(f"Client with task id: {eio_sid} sent control data {data}")
 
     try:
-        control_command = ControlCommand(**data)
-
-        if control_command.clear_queue:
-            task.clear_storage()
-
-        task.store_control_data(control_command)
-
+        command = ControlCommand(**data)
     except:
         pass # Send error information to client
 
+    if command.cmd_type == ControlCmdType.SET_STATE:  # TODO: change ControlCmdType to INIT_NETAPP
 
-@socketio.on('disconnect', namespace='/results')
-def disconnect_results():
-    print(f"Client disconnected from /results namespace: session id: {session.sid}, websocket id: {request.sid}")
+        # Check that NetApp has not been initialized before
+        if eio_sid in tasks:
+            logger.error(f"Client attempted to initialize the NetApp multiple times.")
+            sio.emit(
+                "control_cmd_error",
+                {"error": "NetApp already initialized."},
+                namespace='/control',
+                to=sid
+            )
+            return
+
+        args = command.data
+        h264 = False
+        if args:
+            h264 = args.get("h264", False)
+            fps = args.get("fps", 30)
+            width = args.get("width", 0)
+            height = args.get("height", 0)
+            logger.info(f"H264: {h264}")
+            logger.info(f"Video {width}x{height}, {fps} FPS")
+        
+        # queue with received images
+        image_queue = Queue(NETAPP_INPUT_QUEUE)
+
+        if h264:
+            task = TaskHandlerInternalQ(eio_sid, image_queue, decoder=H264Decoder(fps, width, height))
+        else:
+            task = TaskHandlerInternalQ(eio_sid, image_queue)
+
+        # create worker and run it as thread, listening to image_queue
+        worker = TrainDetectorWorker(image_queue, sio, name=f"Detector {eio_sid}", daemon=True)
+        worker.start()
+
+        tasks[eio_sid] = task
+        detector_threads[eio_sid] = worker
+
+    else:
+        # check that task is running
+        if eio_sid not in tasks:
+            logger.error(f"Non-registered client tried to send control command.")
+            sio.emit(
+                "control_cmd_error",
+                {"error": "NetApp not initialized"},
+                namespace='/control',
+                to=sid
+            )
+            return
+
+        task = tasks[eio_sid]
+
+        if command.clear_queue:
+            task.clear_storage()
+
+        task.store_control_data(command)
 
 
-@socketio.on('disconnect', namespace='/data')
-def disconnect_data():
-    print(f"Client disconnected from /data namespace: session id: {session.sid}, websocket id: {request.sid}")
+@sio.on('disconnect', namespace='/data')
+def disconnect_data(sid):
+    eio_sid = sio.manager.eio_sid_from_sid(sid, "/data")
+    task = tasks.pop(eio_sid)
+    detector = detector_threads.pop(eio_sid)
+    detector.stop()
+    logger.info(f"Client disconnected from /data namespace: session id: {sid}")
 
 
-@socketio.on('disconnect', namespace='/control')
-def disconnect_control():
-    print(f"Client disconnected from /control namespace: session id: {session.sid}, websocket id: {request.sid}")
+@sio.on('disconnect', namespace='/control')
+def disconnect_control(sid):
+    logger.info(f"Client disconnected from /control namespace: session id: {sid}")
 
 
-def get_ports_range(ports_range) -> list:
-    """
-    Decodes port range in format port_1:port_n
-
-    Args:
-        ports_range (str): range of ports
-
-    Raises:
-        ArgFormatError: raised when ports range is in incorrect format
-
-    Returns:
-        list: list of ports
-    """
-    if ports_range.count(':') != 1:
-        raise ArgFormatError
-    r1, r2 = ports_range.split(':')
-    if int(r2) <= int(r1):
-        raise ArgFormatError
-    return [port for port in range(int(r1), int(r2) + 1)]
+@sio.on('disconnect', namespace='/results')
+def disconnect_results(sid):
+    logger.info(f"Client disconnected from /results namespace: session id: {sid}")
 
 
-def main(args=None):
+def main():
     logging.getLogger().setLevel(logging.DEBUG)
 
     parser = argparse.ArgumentParser(description='Standalone variant of object detection NetApp')
-    # TODO: in future versions, the ports should be specified as list instead of range, preferably
-    #       using env variable, for compatibility with middleware
-    parser.add_argument(
-        '--ports',
-        default="5001:5003",
-        help="Specify the range of ports available for gstreamer connections. Format "
-             "port_start:port_end. Default is 5001:5003."
-        )
     parser.add_argument(
         '--detector',
-        default="fps",
-        help="Select detector. Available options are opencv, mmdetection, fps. Default is fps."
+        default="mmdetection",
+        help="This argument is currently ignored."
         )
     args = parser.parse_args()
-    global free_ports
-    try:
-        free_ports = get_ports_range(args.ports)
-    except ArgFormatError:
-        logging.error("Port range specified in wrong format. The correct format is port_start:port_end, e.g. 5001:5003.")
-        exit()
-    
-    logging.info("Starting Train Detector Service interface.")
+        
+    logger.info("Starting Train Detector Service interface.")
+    logger.info(f"The size of the queue set to: {NETAPP_INPUT_QUEUE}")
 
     # runs the flask server
-    # allow_unsafe_werkzeug needs to be true to run inside the docker
-    # TODO: use better webserver
-    socketio.run(app, port=NETAPP_PORT, host='0.0.0.0', allow_unsafe_werkzeug=True)
+    app.run(port=NETAPP_PORT, host='0.0.0.0')
 
 
 if __name__ == '__main__':

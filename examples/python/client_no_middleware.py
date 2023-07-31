@@ -2,15 +2,12 @@ from __future__ import annotations
 
 import argparse
 import logging
-import math
 import os
 import signal
 import time
 import traceback
 
-from datetime import datetime
-from queue import Queue, Empty
-from threading import Event, Thread
+from queue import Queue
 from types import FrameType
 from typing import Any, Dict, Optional
 
@@ -19,12 +16,9 @@ import numpy as np
 
 from era_5g_client.client_base import NetAppClientBase
 from era_5g_client.exceptions import FailedToConnect
-
-from era_5g_client.dataclasses import NetAppLocation
-
+from era_5g_interface.utils.rate_timer import RateTimer
 from era_5g_interface.dataclasses.control_command import ControlCmdType, ControlCommand
 
-from era_5g_interface.utils.rate_timer import RateTimer
 from utils.results_viewer import ResultsViewer
 
 
@@ -106,10 +100,6 @@ def main() -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
-        # creates an instance of NetApp client with results callback
-        client = NetAppClientBase(get_results)
-        # register with an ad-hoc deployed NetApp
-        client.register(NetAppLocation(NETAPP_ADDRESS, NETAPP_PORT), ws_data=True, use_control_cmds=True)
         if FROM_SOURCE:
             # creates a video capture to pass images to the NetApp either from webcam ...
             cap = cv2.VideoCapture(0)
@@ -120,15 +110,24 @@ def main() -> None:
             cap = cv2.VideoCapture(TEST_VIDEO_FILE)
             if not cap.isOpened():
                 raise Exception("Cannot open video file")
+            
+        fps = cap.get(cv2.CAP_PROP_FPS)
+
+        # creates an instance of NetApp client with results callback
+        client = NetAppClientBase(get_results)
+        # register with an ad-hoc deployed NetApp
+        netapp_address = f"http://{NETAPP_ADDRESS}:{NETAPP_PORT}/"
+        client_args=None
+        #client_args = {"h264": True, "width": 640, "height": 480, "fps": fps}
+        client.register(netapp_address, args=client_args)
 
         # create timer to ensure required fps speed of the sending loop
-        fps = cap.get(cv2.CAP_PROP_FPS)
         logging.info(f"Using RateTimer with {fps} FPS.")
         rate_timer = RateTimer(rate=fps, iteration_miss_warning=True)
 
         while not stopped:
             ret, frame = cap.read()
-            timestamp = time.time_ns()
+            timestamp = time.perf_counter_ns()
             if not ret:
                 break
             resized = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)

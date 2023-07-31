@@ -1,7 +1,6 @@
 
 from queue import Empty, Queue
 from threading import Thread, Event
-import flask_socketio
 import logging
 import cv2
 
@@ -9,6 +8,7 @@ import numpy as np
 import time
 
 from era_5g_interface.dataclasses.control_command import ControlCommand, ControlCmdType
+from era_5g_interface.interface_helpers import LatencyMeasurements
 
 from era_5g_train_detection_standalone.modules.mm_detector import MMDetector
 from era_5g_train_detection_standalone.modules.detection_processing import DetectionProcessing
@@ -29,7 +29,7 @@ class TrainDetectorWorker(Thread):
     the results.
     """
 
-    def __init__(self, image_queue: Queue, app, sort_tracker_params=None, optical_flow_params= None, **kw):
+    def __init__(self, image_queue: Queue, sio, sort_tracker_params=None, optical_flow_params= None, **kw):
         """
         Constructor
 
@@ -44,12 +44,14 @@ class TrainDetectorWorker(Thread):
 
         super().__init__(**kw)
         self.image_queue = image_queue
-        self.app = app
+        self.sio = sio
 
         self.stop_event = Event()
 
         self.time = None 
         self.fps = 0.0 
+
+        self.latency_measurements = LatencyMeasurements()
 
         # Variables for measuring processing speed
         self.proc_times_len = 10  # Number of measuements for averaging
@@ -102,12 +104,16 @@ class TrainDetectorWorker(Thread):
             if DEBUG_SHOW_FPS:
                 t1 = time.time() # Start timer
 
+            metadata["timestamp_before_process"] = time.perf_counter_ns()
+
             # Detect individual obejcts
             detections = self.detector.process_image(image)
             data.update(detections)  # Add detections to the dict with data
 
             # Process detections and determine if there is any movement
             self.detection_processing.process_detections(data)
+
+            metadata["timestamp_after_process"] = time.perf_counter_ns()
             
             if DEBUG_SHOW_FPS:
                 self.processing_times[self.ring_buffer_index] = time.time() - t1
@@ -134,19 +140,21 @@ class TrainDetectorWorker(Thread):
 
         """
 
-        send_timestamp = time.time_ns()
+        send_timestamp = time.perf_counter_ns()
+
+        self.latency_measurements.store_latency(send_timestamp - metadata["recv_timestamp"])
 
         # Send only the necessary data about movements (no images, etc.),
         # add timestamp to the results
         r = {"timestamp": metadata["timestamp"],
              "recv_timestamp": metadata["recv_timestamp"],
+             "timestamp_before_process": metadata["timestamp_before_process"],
+             "timestamp_after_process": metadata["timestamp_after_process"],
              "send_timestamp": send_timestamp,
              "movements": data["movements"], # list(dict("bbox": bbox, "moving": 0/1/-1))
                 # bbox is: x1, y1, x2, y2 (top-left bottom-right corners)
             }
 
-        # use the flask app to return the results
-        with self.app.app_context():
-            flask_socketio.send(r, namespace='/results', to=metadata["websocket_id"])
+        self.sio.emit("message", r, namespace='/results', to=metadata["websocket_id"])
 
 
