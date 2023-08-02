@@ -8,7 +8,7 @@ The robot can utilize this service each time it is about to cross a railway trac
 
 ### Docker 
 
-Dockerfile is available in src/docker directory. Instructions for building and running docker image are in [docker readme](/src/docker/README.md).
+Dockerfile is available in src/docker directory. Instructions for building and running docker image are in [docker readme](/src/docker/README.md). Current version uploaded to DockerHub is 0.1.0 (see https://hub.docker.com/r/but5gera/era_5g_train_detection_standalone/tags).
 
 
 ### Local Installation
