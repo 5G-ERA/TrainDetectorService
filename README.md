@@ -18,9 +18,11 @@ If you want to install the application locally, instead of using docker, see [lo
 
 ### Client example
 
-Client code example is provided in [client_no_middleware.py](/examples/python/client_no_middleware.py).
+Client code example is provided in [client_no_middleware.py](/examples/python/client_no_middleware.py). To run the example script, following requirements needs to be installed: era-5g-client 0.4.1, simple-websocket
 
-
+```bash
+pip install era-5g-client==0.4.1 simple-websocket
+```
 ### Related Repositories
 
 - [era-5g-interface](https://github.com/5G-ERA/era-5g-interface) - Python interface (support classes) for Net Applications.
