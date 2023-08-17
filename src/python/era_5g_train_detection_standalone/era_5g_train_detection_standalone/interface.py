@@ -204,7 +204,7 @@ def control_command_callback_websocket(sid, data: Dict):
     except:
         pass # Send error information to client
 
-    if command.cmd_type == ControlCmdType.SET_STATE:  # TODO: change ControlCmdType to INIT_NETAPP
+    if command.cmd_type == ControlCmdType.INIT: 
 
         # Check that NetApp has not been initialized before
         if eio_sid in tasks:
