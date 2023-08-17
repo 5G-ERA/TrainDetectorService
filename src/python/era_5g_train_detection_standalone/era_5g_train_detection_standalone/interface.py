@@ -103,10 +103,6 @@ def image_callback_websocket(sid, data: dict):
     Args:
         data (dict): A base64 encoded image frame and (optionally) related timestamp in format:
             {'frame': 'base64data', 'timestamp': 'int'}
-
-    Raises:
-        ConnectionRefusedError: Raised when attempt for connection were made
-            without registering first or frame was not passed in correct format.
     """
     logging.debug("A frame recieved using ws")
     recv_timestamp = time.perf_counter_ns()
@@ -178,10 +174,6 @@ def json_callback_websocket(sid, data):
 
     Args:
         data (dict): NetApp-specific json data
-
-    Raises:
-        ConnectionRefusedError: Raised when attempt for connection were made
-            without registering first.
     """
     print(data)
     logger.info(f"Client with task id: {sio.manager.eio_sid_from_sid(sid, '/data')} sent data {data}")
