@@ -157,7 +157,7 @@ def image_callback_websocket(sid, data: dict):
             to=sid
         )
     
-    task.store_image(
+    task.store_data(
         {"sid": eio_sid,
         "timestamp": timestamp,
         "recv_timestamp": recv_timestamp,
@@ -193,17 +193,23 @@ def control_command_callback_websocket(sid, data: Dict):
 
     try:
         command = ControlCommand(**data)
-    except:
-        pass # Send error information to client
+    except TypeError as e:
+        logger.error(f"Could not parse Control Command. {str(e)}")
+        sio.emit(
+            "control_cmd_error",
+            {"error": f"Could not parse Control Command. {str(e)}"},
+            namespace='/control',
+            to=sid
+        )
+        return
 
     if command.cmd_type == ControlCmdType.INIT: 
-
-        # Check that NetApp has not been initialized before
+        # Check that initialization has not been called before
         if eio_sid in tasks:
-            logger.error(f"Client attempted to initialize the NetApp multiple times.")
+            logger.error(f"Client attempted to call initialization multiple times.")
             sio.emit(
                 "control_cmd_error",
-                {"error": "NetApp already initialized."},
+                {"error": "Initialization has already been called before."},
                 namespace='/control',
                 to=sid
             )
@@ -276,7 +282,7 @@ def disconnect_results(sid):
 def main():
     logging.getLogger().setLevel(logging.DEBUG)
 
-    parser = argparse.ArgumentParser(description='Standalone variant of object detection NetApp')
+    parser = argparse.ArgumentParser(description='Train Detector Service NetApp')
     parser.add_argument(
         '--detector',
         default="mmdetection",

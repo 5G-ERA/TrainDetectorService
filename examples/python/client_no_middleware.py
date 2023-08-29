@@ -22,7 +22,7 @@ from era_5g_interface.dataclasses.control_command import ControlCmdType, Control
 from utils.results_viewer import ResultsViewer
 
 
-image_storage: Dict[str, np.ndarray] = dict()
+image_storage: Dict[int, np.ndarray] = dict()
 results_storage: Queue[Dict[str, Any]] = Queue()
 stopped = False
 verbose = False
@@ -131,12 +131,11 @@ def main() -> None:
             if not ret:
                 break
             resized = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
-            timestamp_str = str(timestamp)
             if not args.no_results:
-                image_storage[timestamp_str] = resized
+                image_storage[timestamp] = resized
 
             rate_timer.sleep()  # sleep until next frame should be sent (with given fps)
-            client.send_image_ws(resized, timestamp_str)
+            client.send_image_ws(resized, timestamp)
 
         # Send command to reset internal state of the NetApp
         control_cmd = ControlCommand(ControlCmdType.RESET_STATE, clear_queue=True)
