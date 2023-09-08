@@ -3,6 +3,7 @@ opencv_python==4.6.*
 
 filterpy==1.4.*
 
+simple-websocket~=0.9.0
 python-socketio[client]~=5.8.0
 flask==2.2.*
 
