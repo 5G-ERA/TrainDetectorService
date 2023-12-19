@@ -3,7 +3,7 @@
 
 How to build (CUDA):
 ```bash
-sudo docker build . -f docker/era_5g_train_detection_standalone/Dockerfile.gpu -t but5gera/era_5g_train_detection_standalone:VERSION
+sudo docker build . -f docker/era_5g_train_detection_standalone/gpu.Dockerfile -t but5gera/era_5g_train_detection_standalone:VERSION
 ```
 
 How to run:
