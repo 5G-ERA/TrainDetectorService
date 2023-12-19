@@ -2,23 +2,38 @@
 import numpy as np
 import os
 
-from mmdet.core import get_classes
+from mmdet.evaluation import get_classes
 from mmdet.apis import init_detector, inference_detector
 
 
 # mmDetection model config and checkpoint files (=allowed values of NETAPP_MODEL_VARIANT env variable)
 MODEL_VARIANTS = {
+
+    
+
     'yolov3_mobilenet': {
-        'config_file': 'configs/yolo/yolov3_mobilenetv2_320_300e_coco.py',
+        'config_file': 'configs/yolo/yolov3_mobilenetv2_8xb24-320-300e_coco.py',
         'checkpoint_file': 'configs/yolo/yolov3_mobilenetv2_320_300e_coco_20210719_215349-d18dff72.pth',
         'with_masks': False
     },
 
     'mask_rcnn_r50': {
-        'config_file': 'configs/mask_rcnn/mask_rcnn_r50_caffe_fpn_mstrain-poly_3x_coco.py',
+        'config_file': 'configs/mask_rcnn/mask-rcnn_r50-caffe_fpn_ms-poly-3x_coco.py',
         'checkpoint_file': 'configs/mask_rcnn/mask_rcnn_r50_caffe_fpn_mstrain-poly_3x_coco_bbox_mAP-0.408__segm_mAP-0'
                            '.37_20200504_163245-42aa3d00.pth',
         'with_masks': True
+    },
+
+    'yolox-l': {
+        'config_file': 'configs/yolox/yolox_l_8xb8-300e_coco.py',
+        'checkpoint_file': 'configs/yolox/yolox_l_8x8_300e_coco_20211126_140236-d3bd2b23.pth',
+        'with_masks': False
+    },
+
+    'dino_r50': {
+        'config_file': 'configs/dino/dino-4scale_r50_8xb2-12e_coco.py',
+        'checkpoint_file': 'configs/dino/dino-4scale_r50_8xb2-12e_coco_20221202_182705-55b2bba2.pth',
+        'with_masks': False
     },
 
     # Example:
@@ -88,36 +103,23 @@ class MMDetector():
 
     def _convert_mmdet_result(self, result, dataset='coco', score_thr=0.5, merged_data=True):
         """Convert raw results from mmDet detector."""
-        
-        # inspired by:
-        # https://github.com/open-mmlab/mmdetection/issues/248#issuecomment-454276078
-        # and
-        # https://vinleonardo.com/detecting-objects-in-pictures-and-extracting-their-data-using-mmdetection/
 
-        segm_result = None
+        masks_raw = None
         if self.with_masks:
-            bbox_result, segm_result = result
-        else:
-            bbox_result = result
+            masks_raw = result.pred_instances.masks.cpu().numpy()
 
-        # bbox_result is a list (with size equal to the number of all possible classes) of arrays with detections (for each class)
+        class_ids_raw = result.pred_instances.labels.cpu().numpy()
+        bboxes_raw = result.pred_instances.bboxes.cpu().numpy()
+        scores_raw = result.pred_instances.scores.cpu().numpy()
 
         # Filter by class id
         if self.class_id_filter is not None:
-            bbox_result = [bbox_result[self.class_id_filter]]
-            if segm_result is not None:
-                segm_result = [segm_result[self.class_id_filter]]
+            class_filter_inds = np.where(class_ids_raw == self.class_id_filter)[0]
+            bboxes_raw = bboxes_raw[class_filter_inds]
+            scores_raw = scores_raw[class_filter_inds]
             # all class ids will be the same (but keep the data structure compatible)
-            class_ids_raw = [[self.class_id_filter for _ in range(bbox_result[0].shape[0])]]
-        else:
-            class_ids_raw = [
-                np.full(bbox.shape[0], i, dtype=np.int32) \
-                for i, bbox in enumerate(bbox_result)
-            ]
-        class_ids_raw = np.concatenate(class_ids_raw)
-        bboxes_with_scores = np.vstack(bbox_result)
-        scores_raw = bboxes_with_scores[:, -1]
-        bboxes_raw = bboxes_with_scores[:, :-1]
+            class_ids_raw = class_ids_raw[class_filter_inds]
+
         filtered_inds = np.where(scores_raw > score_thr)[0]
         bboxes = bboxes_raw[filtered_inds]
         scores = scores_raw[filtered_inds]
@@ -127,9 +129,7 @@ class MMDetector():
         class_names = [all_class_names[i] for i in class_ids]
 
         if self.with_masks:
-            # original results have length of num_classes, and then for each class there are individual detections
-            all_masks = np.array([item for sublist in segm_result for item in sublist])  # flatten the structure
-            filtered_masks = all_masks[filtered_inds]  # filter by given confidence threshold
+            filtered_masks = masks_raw[filtered_inds]  # filter by given confidence threshold
 
         if merged_data:
             if self.with_masks:

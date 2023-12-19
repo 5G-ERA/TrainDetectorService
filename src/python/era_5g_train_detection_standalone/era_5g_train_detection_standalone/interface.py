@@ -1,282 +1,203 @@
-import base64
 import argparse
-import binascii
-import cv2
-import os
-import numpy as np
 import logging
+import numpy as np
+import os
 import time
-import socketio
-import threading
+import traceback
 
+from functools import partial
 from queue import Queue
-from typing import Dict
-
-from flask import Flask
+from typing import Dict, Optional, Tuple, Any
 
 from era_5g_train_detection_standalone.worker import TrainDetectorWorker
-from era_5g_interface.task_handler import TaskHandler
+
+from era_5g_interface.channels import CallbackInfoServer, ChannelType, DATA_NAMESPACE, DATA_ERROR_EVENT
+from era_5g_interface.dataclasses.control_command import ControlCommand, ControlCmdType
+from era_5g_interface.interface_helpers import HeartBeatSender, RepeatedTimer
+from era_5g_interface.interface_helpers import MIDDLEWARE_REPORT_INTERVAL
+
 from era_5g_interface.task_handler_internal_q import TaskHandlerInternalQ
 
-from era_5g_interface.h264_decoder import H264Decoder
-from era_5g_interface.interface_helpers import HeartBeatSender
-from era_5g_interface.interface_helpers import MIDDLEWARE_REPORT_INTERVAL
-from era_5g_interface.dataclasses.control_command import ControlCommand, ControlCmdType
+from era_5g_server.server import NetworkApplicationServer
+
 
 logger = logging.getLogger("TrainDetectorService NetApp interface")
 
 # port of the netapp's server
 NETAPP_PORT = os.getenv("NETAPP_PORT", 5896)
 # input queue size
-NETAPP_INPUT_QUEUE = int(os.getenv("NETAPP_INPUT_QUEUE", 1))
+NETAPP_INPUT_QUEUE = int(os.getenv("NETAPP_INPUT_QUEUE", 15))
 
 
-# the max_http_buffer_size parameter defines the max size of the message to be passed
-sio = socketio.Server(async_mode='threading', async_handlers=False, max_http_buffer_size=5 * (1024 ** 2))
-app = Flask(__name__)
-app.wsgi_app = socketio.WSGIApp(sio, app.wsgi_app)
+class Server(NetworkApplicationServer):
+    """Server receives images and commands from client, sends them to worker, and sends results to client."""
 
+    def __init__(
+        self,
+        *args,
+        **kwargs,
+    ) -> None:
+        """Constructor.
 
-detector_threads: Dict[str, TrainDetectorWorker] = {}
-tasks: Dict[str, TaskHandler] = dict()
+        Args:
+            *args: NetworkApplicationServer arguments.
+            **kwargs: NetworkApplicationServer arguments.
+        """
 
-
-heart_beat_sender = HeartBeatSender()
-
-
-def heart_beat_timer():
-    latencies = []
-    for worker in detector_threads.values():
-        latencies.extend(worker.latency_measurements.get_latencies())
-    avg_latency = 0
-    if len(latencies) > 0:
-        avg_latency = float(np.mean(np.array(latencies)))
-
-    queue_size = 1
-    queue_occupancy = 1
-
-    heart_beat_sender.send_middleware_heart_beat(
-        avg_latency=avg_latency, queue_size=queue_size, queue_occupancy=queue_occupancy, current_robot_count=len(tasks)
-    )
-    threading.Timer(MIDDLEWARE_REPORT_INTERVAL, heart_beat_timer).start()
-
-
-heart_beat_timer()
-
-
-def get_sid_of_namespace(eio_sid, namespace):
-    return sio.manager.sid_from_eio_sid(eio_sid, namespace)
-
-def get_results_sid(eio_sid):
-    return sio.manager.sid_from_eio_sid(eio_sid, "/results")
-
-
-@sio.on('connect', namespace='/data')
-def connect_data(sid, environ):
-    """Creates a websocket connection to the client for passing the data."""
-
-    logger.info(f"Connected data. Session id: {sio.manager.eio_sid_from_sid(sid, '/data')}, ws_sid: {sid}")
-    sio.send("You are connected", namespace='/data', to=sid)
-
-
-@sio.on('connect', namespace='/control')
-def connect_control(sid, environ):
-    """Creates a websocket connection to the client for passing control commands."""
-
-    logger.info(f"Connected control. Session id: {sio.manager.eio_sid_from_sid(sid, '/control')}, ws_sid: {sid}")
-    sio.send("You are connected", namespace='/control', to=sid)
-
-
-@sio.on('connect', namespace='/results')
-def connect_results(sid, environ):
-    """Creates a websocket connection to the client for passing the results."""
-
-    logger.info(f"Connected results. Session id: {sio.manager.eio_sid_from_sid(sid, '/results')}, ws_sid: {sid}")
-    sio.send("You are connected", namespace='/results', to=sid)
-
-
-@sio.on('image', namespace='/data')
-def image_callback_websocket(sid, data: dict):
-    """
-    Allows to receive jpg-encoded image using the websocket transport
-
-    Args:
-        data (dict): A base64 encoded image frame and (optionally) related timestamp in format:
-            {'frame': 'base64data', 'timestamp': 'int'}
-    """
-    logging.debug("A frame recieved using ws")
-    recv_timestamp = time.perf_counter_ns()
-    
-    if 'timestamp' in data:
-        timestamp = data['timestamp']
-    else:
-        logger.info("Timestamp not set, setting default value")
-        timestamp = 0
-
-    eio_sid = sio.manager.eio_sid_from_sid(sid, '/data')
-
-    if eio_sid not in tasks:
-        logger.error(f"Non-registered client tried to send data")
-        sio.emit(
-            "image_error",
-            {"timestamp": timestamp,
-             "error": "Not connected"},
-            namespace='/data',
-            to=sid
+        super().__init__(
+            callbacks_info={
+                "image_jpeg": CallbackInfoServer(ChannelType.JPEG, self.image_callback),
+                "image_h264": CallbackInfoServer(ChannelType.H264, self.image_callback),
+                "json": CallbackInfoServer(ChannelType.JSON, self.json_callback),
+            },
+            *args,
+            **kwargs,
         )
-        return
 
-    if 'frame' not in data:
-        logger.error(f"Data does not contain frame.")
-        sio.emit(
-            "image_error",
-            {"timestamp": timestamp,
-             "error": "Data does not contain frame."},
-            namespace='/data',
-            to=sid
+        # The detector to be used.
+        self.detector_threads: Dict[str, TrainDetectorWorker] = {}
+
+        # Dict of registered tasks.
+        self.tasks: Dict[str, TaskHandlerInternalQ] = {} 
+
+        self.heart_beat_sender = HeartBeatSender()
+        heart_beat_timer = RepeatedTimer(MIDDLEWARE_REPORT_INTERVAL, self.heart_beat)
+        heart_beat_timer.start()
+
+    def heart_beat(self):
+        """Heart beat generation and sending."""
+
+        latencies = []
+        for worker in self.detector_threads.values():
+            latencies.extend(worker.latency_measurements.get_latencies())
+        avg_latency = 0
+        if len(latencies) > 0:
+            avg_latency = float(np.mean(np.array(latencies)))
+
+        queue_size = NETAPP_INPUT_QUEUE
+        queue_occupancy = 1  # TODO: Compute 
+
+        self.heart_beat_sender.send_middleware_heart_beat(
+            avg_latency=avg_latency,
+            queue_size=queue_size,
+            queue_occupancy=queue_occupancy,
+            current_robot_count=len(self.tasks),
         )
-        return
 
-    task = tasks[eio_sid]
-    decoded = False
+    def image_callback(self, sid: str, data: Dict[str, Any]):
+        """Allows to receive decoded image using the websocket transport.
 
-    try:
-        if task.decoder:
-            image = task.decoder.decode_packet_data(data["frame"])
-            decoded = True
-        else:
-            frame = base64.b64decode(data["frame"])
-            image = np.frombuffer(frame, dtype=np.uint8)
-    except (ValueError, binascii.Error, Exception) as error:
-        logger.error(f"Failed to decode frame data: {error}")
-        sio.emit(
-            "image_error",
-            {"timestamp": timestamp,
-             "error": f"Failed to decode frame data: {error}"},
-            namespace='/data',
-            to=sid
-        )
-    
-    task.store_data(
-        {"sid": eio_sid,
-        "timestamp": timestamp,
-        "recv_timestamp": recv_timestamp,
-        "websocket_id": get_results_sid(sio.manager.eio_sid_from_sid(sid, "/data")),
-        "decoded": decoded},
-        image
-    )
+        Args:
+            sid (str): Namespace sid.
+            data (Dict[str, Any]): Data dict including decoded frame (data["frame"]) and send timestamp
+                (data["timestamp"]).
+        """
 
-
-@sio.on('json', namespace='/data')
-def json_callback_websocket(sid, data):
-    """
-    Allows to receive general json data using the websocket transport
-
-    Args:
-        data (dict): NetApp-specific json data
-    """
-    print(data)
-    logger.info(f"Client with task id: {sio.manager.eio_sid_from_sid(sid, '/data')} sent data {data}")
-
-
-@sio.on('command', namespace='/control') 
-def control_command_callback_websocket(sid, data: Dict): 
-    """Pass control command to the worker to change its internal state.
-
-    Args:
-        data (dict): Json data with the control command
-    """
-
-    eio_sid = sio.manager.eio_sid_from_sid(sid, '/control')
-
-    logger.debug(f"Client with task id: {eio_sid} sent control data {data}")
-
-    try:
-        command = ControlCommand(**data)
-    except TypeError as e:
-        logger.error(f"Could not parse Control Command. {str(e)}")
-        sio.emit(
-            "control_cmd_error",
-            {"error": f"Could not parse Control Command. {str(e)}"},
-            namespace='/control',
-            to=sid
-        )
-        return
-
-    if command.cmd_type == ControlCmdType.INIT: 
-        # Check that initialization has not been called before
-        if eio_sid in tasks:
-            logger.error(f"Client attempted to call initialization multiple times.")
-            sio.emit(
-                "control_cmd_error",
-                {"error": "Initialization has already been called before."},
-                namespace='/control',
-                to=sid
-            )
-            return
-
-        args = command.data
-        h264 = False
-        if args:
-            h264 = args.get("h264", False)
-            fps = args.get("fps", 30)
-            width = args.get("width", 0)
-            height = args.get("height", 0)
-            logger.info(f"H264: {h264}")
-            logger.info(f"Video {width}x{height}, {fps} FPS")
+        #logging.debug("Image recieved")
+        recv_timestamp = time.perf_counter_ns()
         
-        # queue with received images
-        image_queue = Queue(NETAPP_INPUT_QUEUE)
+        eio_sid = self._sio.manager.eio_sid_from_sid(sid, DATA_NAMESPACE)
 
-        if h264:
-            task = TaskHandlerInternalQ(eio_sid, image_queue, decoder=H264Decoder(fps, width, height))
-        else:
-            task = TaskHandlerInternalQ(eio_sid, image_queue)
-
-        # create worker and run it as thread, listening to image_queue
-        worker = TrainDetectorWorker(image_queue, sio, name=f"Detector {eio_sid}", daemon=True)
-        worker.start()
-
-        tasks[eio_sid] = task
-        detector_threads[eio_sid] = worker
-
-    else:
-        # check that task is running
-        if eio_sid not in tasks:
-            logger.error(f"Non-registered client tried to send control command.")
-            sio.emit(
-                "control_cmd_error",
-                {"error": "NetApp not initialized"},
-                namespace='/control',
-                to=sid
-            )
+        if eio_sid not in self.tasks:
+            logger.error(f"Non-registered client tried to send data")
+            self.send_data({"message": "Non-registered client tried to send data"}, DATA_ERROR_EVENT, sid=sid)
             return
 
-        task = tasks[eio_sid]
+        task = self.tasks[eio_sid]
+            
+        task.store_data(
+            {"sid": eio_sid,
+            "timestamp": data["timestamp"],
+            "recv_timestamp": recv_timestamp,
+            "decoded": True},  # Currently, the image is always decoded before it is received here
+            data["frame"]
+        )
 
-        if command.clear_queue:
-            task.clear_storage()
+    def json_callback(self, sid: str, data: Dict):
+        """
+        Allows to receive general json data using the websocket transport
 
-        task.store_control_data(command)
+        Args:
+            sid (str): Namespace sid.
+            data (Dict): 5G-ERA Network Application specific JSON data.
+        """
+        # Currently not used
 
+        logger.info(f"Client with task id: {self.get_eio_sid_of_data(sid)} sent data {data}")
 
-@sio.on('disconnect', namespace='/data')
-def disconnect_data(sid):
-    eio_sid = sio.manager.eio_sid_from_sid(sid, "/data")
-    task = tasks.pop(eio_sid)
-    detector = detector_threads.pop(eio_sid)
-    detector.stop()
-    logger.info(f"Client disconnected from /data namespace: session id: {sid}")
+    def command_callback(self, command: ControlCommand, sid: str) -> Tuple[bool, str]:
+        """Pass control command to the worker to change its internal state.
 
+        Args:
+            command (ControlCommand): Control command to be processed.
+            sid (str): Namespace sid.
+        
+        Returns:
+            (result (bool), message (str)): Result of control command processing and message with description.
+        """
 
-@sio.on('disconnect', namespace='/control')
-def disconnect_control(sid):
-    logger.info(f"Client disconnected from /control namespace: session id: {sid}")
+        eio_sid = self.get_eio_sid_of_control(sid)
 
+        logger.debug(f"Processing control command {command}, session id: {sid}")
 
-@sio.on('disconnect', namespace='/results')
-def disconnect_results(sid):
-    logger.info(f"Client disconnected from /results namespace: session id: {sid}")
+        if command.cmd_type == ControlCmdType.INIT: 
+            # Check that initialization has not been called before
+            if eio_sid in self.tasks:
+                logger.error(f"Client attempted to call initialization multiple times.")
+                self.send_command_error("Initialization has already been called before", sid)
+                return False, "Initialization has already been called before"
+            
+            # queue with received images
+            image_queue = Queue(NETAPP_INPUT_QUEUE)
+
+            task = TaskHandlerInternalQ(image_queue)
+
+            try:
+                # create worker and run it as thread, listening to image_queue
+                send_function = partial(self.send_data, event="results", sid=self.get_sid_of_data(eio_sid))
+                worker = TrainDetectorWorker(image_queue, send_function, name=f"Detector {eio_sid}", daemon=True)
+            except Exception as ex:
+                logger.error(f"Failed to create Detector: {repr(ex)}")
+                logger.error(traceback.format_exc())
+                self.send_command_error(f"Failed to create Detector: {repr(ex)}", sid)
+                return False, f"Failed to create Detector: {repr(ex)}"
+
+            worker.start()
+
+            self.tasks[eio_sid] = task
+            self.detector_threads[eio_sid] = worker
+
+        else:
+            # check that task is running
+            if eio_sid not in self.tasks:
+                logger.error(f"Non-registered client tried to send control command.")
+                self.send_command_error("Non-registered client tried to send control command", sid)
+                return False, "Network Application not initialized"
+            
+            task = self.tasks[eio_sid]
+
+            if command.clear_queue:
+                task.clear_storage()
+
+            task.store_control_data(command)
+        
+        return True, (
+                f"Control command applied, eio_sid {eio_sid}, sid {sid}, results sid"
+                f" {self.get_sid_of_data(eio_sid)}, command {command}"
+        )
+    
+    def disconnect_callback(self, sid: str) -> None:
+        """Called when client disconnects - deletes task and worker.
+
+        Args:
+            sid (str): Namespace sid.
+        """
+
+        eio_sid = self.get_eio_sid_of_data(sid)
+        self.tasks.pop(eio_sid)
+        detector = self.detector_threads.pop(eio_sid)
+        detector.stop()
+        logger.info(f"Client disconnected from {DATA_NAMESPACE} namespace: session id: {sid}")
 
 
 def main():
@@ -294,7 +215,12 @@ def main():
     logger.info(f"The size of the queue set to: {NETAPP_INPUT_QUEUE}")
 
     # runs the flask server
-    app.run(port=NETAPP_PORT, host='0.0.0.0')
+    server = Server(port=NETAPP_PORT, host="0.0.0.0")
+
+    try:
+        server.run_server()
+    except KeyboardInterrupt:
+        logger.info("Terminating ...")
 
 
 if __name__ == '__main__':

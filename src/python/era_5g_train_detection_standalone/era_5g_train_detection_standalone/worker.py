@@ -7,6 +7,8 @@ import cv2
 import numpy as np
 import time
 
+from typing import Dict, Callable
+
 from era_5g_interface.dataclasses.control_command import ControlCommand, ControlCmdType
 from era_5g_interface.interface_helpers import LatencyMeasurements
 
@@ -29,13 +31,13 @@ class TrainDetectorWorker(Thread):
     the results.
     """
 
-    def __init__(self, image_queue: Queue, sio, sort_tracker_params=None, optical_flow_params= None, **kw):
+    def __init__(self, image_queue: Queue, send_function: Callable[[Dict], None], sort_tracker_params=None, optical_flow_params=None, **kw):
         """
         Constructor
 
         Args:
             image_queue (Queue): The queue with all to-be-processed images.
-            app (_type_): The flask app for results publishing.
+            send_function (Callable[[Dict], None]): Callback used to send results.
             sort_tracker_params (dict, optional): Dictionary with 
                 optional SORT tracker parameters.
             optical_flow_params (dict, optional): Dictionary with 
@@ -44,7 +46,7 @@ class TrainDetectorWorker(Thread):
 
         super().__init__(**kw)
         self.image_queue = image_queue
-        self.sio = sio
+        self.send_function = send_function
 
         self.stop_event = Event()
 
@@ -155,6 +157,5 @@ class TrainDetectorWorker(Thread):
                 # bbox is: x1, y1, x2, y2 (top-left bottom-right corners)
             }
 
-        self.sio.emit("message", r, namespace='/results', to=metadata["websocket_id"])
-
+        self.send_function(r)
 

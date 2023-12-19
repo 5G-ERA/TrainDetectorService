@@ -16,6 +16,7 @@ import numpy as np
 
 from era_5g_client.client_base import NetAppClientBase
 from era_5g_client.exceptions import FailedToConnect
+from era_5g_interface.channels import CallbackInfoClient, ChannelType
 from era_5g_interface.utils.rate_timer import RateTimer
 from era_5g_interface.dataclasses.control_command import ControlCmdType, ControlCommand
 
@@ -72,6 +73,14 @@ def main() -> None:
         default=False, action="store_true",
         help="Print information about processed data. Defaults to False."
         )
+    parser.add_argument("-c", "--crop",
+        default=False, action="store_true",
+        help="Crop fisheye image from BringAuto."
+        )
+    parser.add_argument("--h264",
+        default=False, action="store_true",
+        help="Use h264 compression."
+        )
     args = parser.parse_args()
     global verbose
     verbose = args.verbose
@@ -101,7 +110,7 @@ def main() -> None:
 
     try:
         if FROM_SOURCE:
-            # creates a video capture to pass images to the NetApp either from webcam ...
+            # creates a video capture to pass images to the 5G-ERA Network Application either from webcam ...
             cap = cv2.VideoCapture(0)
             if not cap.isOpened():
                 raise Exception("Cannot open camera")
@@ -113,12 +122,20 @@ def main() -> None:
             
         fps = cap.get(cv2.CAP_PROP_FPS)
 
+        #cap.set(cv2.CAP_PROP_POS_MSEC, 9000)  # debug 
+
         # creates an instance of NetApp client with results callback
-        client = NetAppClientBase(get_results)
+        client = NetAppClientBase({"results": CallbackInfoClient(ChannelType.JSON, get_results)})
         # register with an ad-hoc deployed NetApp
         netapp_address = f"http://{NETAPP_ADDRESS}:{NETAPP_PORT}/"
+        target_w, target_h = 640, 480
         client_args=None
-        #client_args = {"h264": True, "width": 640, "height": 480, "fps": fps}
+        channel_name = "image_jpeg"
+        channel_type = ChannelType.JPEG
+        if args.h264:
+            client_args = {"h264": True, "width": target_w, "height": target_h, "fps": fps}
+            channel_name = "image_h264"
+            channel_type = ChannelType.H264
         client.register(netapp_address, args=client_args)
 
         # create timer to ensure required fps speed of the sending loop
@@ -130,12 +147,20 @@ def main() -> None:
             timestamp = time.perf_counter_ns()
             if not ret:
                 break
-            resized = cv2.resize(frame, (640, 480), interpolation=cv2.INTER_AREA)
+
+            if args.crop:
+                # Used for testing with raw fisheye images from BringAuto
+                #print(frame.shape) 720, 1280, 3
+                frame = frame[int(frame.shape[0]/4):int(frame.shape[0]*3/4), int(frame.shape[1]/2):, :]
+                resized = frame
+            else:
+                resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
+            
             if not args.no_results:
                 image_storage[timestamp] = resized
 
             rate_timer.sleep()  # sleep until next frame should be sent (with given fps)
-            client.send_image_ws(resized, timestamp)
+            client.send_image(resized, channel_name, channel_type, timestamp)
 
         # Send command to reset internal state of the NetApp
         control_cmd = ControlCommand(ControlCmdType.RESET_STATE, clear_queue=True)
