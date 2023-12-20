@@ -129,14 +129,12 @@ def main() -> None:
         # register with an ad-hoc deployed NetApp
         netapp_address = f"http://{NETAPP_ADDRESS}:{NETAPP_PORT}/"
         target_w, target_h = 640, 480
-        client_args=None
         channel_name = "image_jpeg"
         channel_type = ChannelType.JPEG
         if args.h264:
-            client_args = {"h264": True, "width": target_w, "height": target_h, "fps": fps}
             channel_name = "image_h264"
             channel_type = ChannelType.H264
-        client.register(netapp_address, args=client_args)
+        client.register(netapp_address)
 
         # create timer to ensure required fps speed of the sending loop
         logging.info(f"Using RateTimer with {fps} FPS.")
