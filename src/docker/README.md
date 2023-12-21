@@ -8,7 +8,7 @@ sudo docker build . -f docker/era_5g_train_detection_standalone/gpu.Dockerfile -
 
 How to run:
 ```bash
-sudo docker run --rm -p 5896:5896 but5gera/era_5g_train_detection_standalone:VERSION
+sudo docker run --gpus all --rm -p 5896:5896 but5gera/era_5g_train_detection_standalone:VERSION
 ```
 
 ## Related Repositories
