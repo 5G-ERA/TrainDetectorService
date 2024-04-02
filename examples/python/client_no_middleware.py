@@ -64,23 +64,35 @@ def get_results(results: Dict[str, Any]) -> None:
 def main() -> None:
     """Creates the client class and starts the data transfer."""
 
-    parser = argparse.ArgumentParser(description='Example client communication without middleware.')
-    parser.add_argument("-n", "--no-results",
-        default=False, action="store_true",
+    parser = argparse.ArgumentParser(description="Example client communication without middleware.")
+    parser.add_argument(
+        "-n",
+        "--no-results",
+        default=False,
+        action="store_true",
         help="Do not show window with visualization of detection results. Defaults to False."
-        )
-    parser.add_argument("-v", "--verbose",
-        default=False, action="store_true",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        default=False,
+        action="store_true",
         help="Print information about processed data. Defaults to False."
-        )
-    parser.add_argument("-c", "--crop",
-        default=False, action="store_true",
+    )
+    parser.add_argument(
+        "-c",
+        "--crop",
+        default=False,
+        action="store_true",
         help="Crop fisheye image from BringAuto."
-        )
-    parser.add_argument("--h264",
-        default=False, action="store_true",
+    )
+    parser.add_argument(
+        "--h264",
+        default=False,
+        action="store_true",
         help="Use h264 compression."
-        )
+    )
+    parser.add_argument("-m", "--measuring", type=bool, help="Enable extended measuring logs", default=False)
     args = parser.parse_args()
     global verbose
     verbose = args.verbose
@@ -125,7 +137,9 @@ def main() -> None:
         #cap.set(cv2.CAP_PROP_POS_MSEC, 9000)  # debug 
 
         # creates an instance of NetApp client with results callback
-        client = NetAppClientBase({"results": CallbackInfoClient(ChannelType.JSON, get_results)})
+        client = NetAppClientBase(
+            {"results": CallbackInfoClient(ChannelType.JSON, get_results)}, extended_measuring=args.measuring
+        )
         # register with an ad-hoc deployed NetApp
         netapp_address = f"http://{NETAPP_ADDRESS}:{NETAPP_PORT}/"
         target_w, target_h = 640, 480

@@ -13,12 +13,10 @@ from era_5g_train_detection_standalone.worker import TrainDetectorWorker
 
 from era_5g_interface.channels import CallbackInfoServer, ChannelType, DATA_NAMESPACE, DATA_ERROR_EVENT
 from era_5g_interface.dataclasses.control_command import ControlCommand, ControlCmdType
-from era_5g_interface.interface_helpers import HeartBeatSender, RepeatedTimer
-from era_5g_interface.interface_helpers import MIDDLEWARE_REPORT_INTERVAL
-
+from era_5g_interface.interface_helpers import HeartbeatSender
 from era_5g_interface.task_handler_internal_q import TaskHandlerInternalQ
 
-from era_5g_server.server import NetworkApplicationServer
+from era_5g_server.server import NETAPP_STATUS_ADDRESS, NetworkApplicationServer, generate_application_heartbeat_data
 
 
 logger = logging.getLogger("TrainDetectorService NetApp interface")
@@ -60,29 +58,26 @@ class Server(NetworkApplicationServer):
         # Dict of registered tasks.
         self.tasks: Dict[str, TaskHandlerInternalQ] = {} 
 
-        self.heart_beat_sender = HeartBeatSender()
-        heart_beat_timer = RepeatedTimer(MIDDLEWARE_REPORT_INTERVAL, self.heart_beat)
-        heart_beat_timer.start()
+        # Create Heartbeat sender
+        self.heartbeat_sender = HeartbeatSender(NETAPP_STATUS_ADDRESS, self.generate_heartbeat_data)
 
-    def heart_beat(self):
+    def generate_heartbeat_data(self):
         """Heart beat generation and sending."""
 
         latencies = []
+
+        queue_occupancy = 0
+        queue_size = 0
+        for task in self.tasks.values():
+            queue_occupancy += task.data_queue_occupancy()
+            queue_size += task.data_queue_size()
         for worker in self.detector_threads.values():
             latencies.extend(worker.latency_measurements.get_latencies())
         avg_latency = 0
         if len(latencies) > 0:
             avg_latency = float(np.mean(np.array(latencies)))
 
-        queue_size = NETAPP_INPUT_QUEUE
-        queue_occupancy = 1  # TODO: Compute 
-
-        self.heart_beat_sender.send_middleware_heart_beat(
-            avg_latency=avg_latency,
-            queue_size=queue_size,
-            queue_occupancy=queue_occupancy,
-            current_robot_count=len(self.tasks),
-        )
+        return generate_application_heartbeat_data(avg_latency, queue_size, queue_occupancy, len(self.tasks))
 
     def image_callback(self, sid: str, data: Dict[str, Any]):
         """Allows to receive decoded image using the websocket transport.
@@ -203,19 +198,20 @@ class Server(NetworkApplicationServer):
 def main():
     logging.getLogger().setLevel(logging.DEBUG)
 
-    parser = argparse.ArgumentParser(description='Train Detector Service NetApp')
+    parser = argparse.ArgumentParser(description="Train Detector Service NetApp")
     parser.add_argument(
-        '--detector',
+        "--detector",
         default="mmdetection",
         help="This argument is currently ignored."
-        )
+    )
+    parser.add_argument("-m", "--measuring", type=bool, help="Enable extended measuring logs", default=False)
     args = parser.parse_args()
         
     logger.info("Starting Train Detector Service interface.")
     logger.info(f"The size of the queue set to: {NETAPP_INPUT_QUEUE}")
 
     # runs the flask server
-    server = Server(port=NETAPP_PORT, host="0.0.0.0")
+    server = Server(port=NETAPP_PORT, host="0.0.0.0", extended_measuring=args.measuring)
 
     try:
         server.run_server()

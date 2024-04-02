@@ -18,10 +18,10 @@ If you want to install the application locally, instead of using docker, see [lo
 
 ### Client example
 
-Client code example is provided in [client_no_middleware.py](/examples/python/client_no_middleware.py). To run the example script, following requirements need to be installed: era-5g-client (min. v0.9.0), era_5g_interface (min. v0.8.0)
+Client code example is provided in [client_no_middleware.py](/examples/python/client_no_middleware.py). To run the example script, following requirements need to be installed: era-5g-client (min. v0.11.0), era_5g_interface (min. v0.10.0)
 
 ```bash
-pip install era-5g-client~=0.9.0 era_5g_interface~=0.8.0
+pip install era-5g-client~=0.11.0 era_5g_interface~=0.10.0
 ```
 ### Related Repositories
 

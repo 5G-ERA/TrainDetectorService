@@ -3,6 +3,6 @@ opencv_python
 
 filterpy==1.4.*
 
-era_5g_interface~=0.8.0
-era_5g_server~=0.2.0
+era_5g_interface~=0.10.0
+era_5g_server~=0.4.0
 

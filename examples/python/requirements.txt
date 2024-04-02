@@ -1,6 +1,6 @@
 numpy~=1.24.4
 opencv_python
 
-era_5g_client~=0.9.0
-era_5g_interface~=0.8.0
+era_5g_client~=0.11.0
+era_5g_interface~=0.10.0
 
