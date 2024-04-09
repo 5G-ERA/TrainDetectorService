@@ -142,8 +142,15 @@ class Server(NetworkApplicationServer):
                 self.send_command_error("Initialization has already been called before", sid)
                 return False, "Initialization has already been called before"
             
+            # Determine queue size
+            queue_size = NETAPP_INPUT_QUEUE
+            if command.data is not None and "queue_size" in command.data:
+                # Client requested different queue size
+                queue_size = command.data["queue_size"]
+                logger.info(f"Init: Overwriting preset queue size {NETAPP_INPUT_QUEUE} with {queue_size}.")
+
             # queue with received images
-            image_queue = Queue(NETAPP_INPUT_QUEUE)
+            image_queue = Queue(queue_size)
 
             task = TaskHandlerInternalQ(image_queue)
 
@@ -196,17 +203,35 @@ class Server(NetworkApplicationServer):
 
 
 def main():
-    logging.getLogger().setLevel(logging.DEBUG)
-
     parser = argparse.ArgumentParser(description="Train Detector Service NetApp")
+    parser.add_argument(
+        "-d",
+        "--debug",
+        help="Set logging level to Debug, default logging level is Info",
+        action="store_const",
+        dest="loglevel",
+        const=logging.DEBUG,
+        default=logging.INFO,
+    )
+    parser.add_argument(
+        "-w",
+        "--warnings_only",
+        help="Set logging level to Warnings, default logging level is Info",
+        action="store_const",
+        dest="loglevel",
+        const=logging.WARNING,
+    )
     parser.add_argument(
         "--detector",
         default="mmdetection",
         help="This argument is currently ignored."
     )
+    parser.add_argument("-i", "--img_log", action="store_true", help="Log received image size", default=False)
     parser.add_argument("-m", "--measuring", type=bool, help="Enable extended measuring logs", default=False)
     args = parser.parse_args()
-        
+
+    logging.basicConfig(level=args.loglevel)
+    
     logger.info("Starting Train Detector Service interface.")
     logger.info(f"The size of the queue set to: {NETAPP_INPUT_QUEUE}")
 

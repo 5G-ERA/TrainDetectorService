@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import signal
 import time
 import traceback
 
+from datetime import datetime
 from queue import Queue
 from types import FrameType
 from typing import Any, Dict, Optional
@@ -19,6 +21,7 @@ from era_5g_client.exceptions import FailedToConnect
 from era_5g_interface.channels import CallbackInfoClient, ChannelType
 from era_5g_interface.utils.rate_timer import RateTimer
 from era_5g_interface.dataclasses.control_command import ControlCmdType, ControlCommand
+from era_5g_interface.measuring import Measuring
 
 from utils.results_viewer import ResultsViewer
 
@@ -27,6 +30,19 @@ image_storage: Dict[int, np.ndarray] = dict()
 results_storage: Queue[Dict[str, Any]] = Queue()
 stopped = False
 verbose = False
+
+measuring_prefix = f"client-final"
+recv_timestamp_name = "final_timestamp"
+measuring_items = {
+    "key_timestamp": 0,
+    recv_timestamp_name: 0,
+    "worker_recv_timestamp": 0,
+    "worker_before_process_timestamp": 0,
+    "worker_after_process_timestamp": 0,
+    "worker_send_timestamp": 0,
+}
+measuring_data = None
+perf_logger = None
 
 # Video from source flag
 FROM_SOURCE = False
@@ -51,6 +67,10 @@ def get_results(results: Dict[str, Any]) -> None:
         results (str): The results in json format
     """
 
+    global measuring_data, recv_timestamp_name, perf_logger
+
+    recv_timestamp = time.time_ns()
+
     if verbose:
         print(results)
 
@@ -59,6 +79,32 @@ def get_results(results: Dict[str, Any]) -> None:
 
     if results_storage is not None:
         results_storage.put(results, block=False)
+
+    # Save final recv time for performance measuring
+    if measuring_data is not None:
+        key_timestamp = results["timestamp"]
+        measuring_data.log_measuring(key_timestamp, recv_timestamp_name, recv_timestamp)
+        
+        # Log other timestamps from the received message
+        measuring_data.log_measuring(
+            key_timestamp, "worker_recv_timestamp", results.get("recv_timestamp", 0)
+        )
+        measuring_data.log_measuring(
+            key_timestamp, "worker_before_process_timestamp", results.get("timestamp_before_process", 0)
+        )
+        measuring_data.log_measuring(
+            key_timestamp, "worker_after_process_timestamp", results.get("timestamp_after_process", 0)
+        )
+        measuring_data.log_measuring(
+            key_timestamp, "worker_send_timestamp", results.get("send_timestamp", 0)
+        )
+
+        measuring_data.store_measuring(key_timestamp)
+
+    # For compatibility purposes (when measuring performance), save also a plain log
+    if perf_logger is not None:
+        log_obj = {"type": "result", "metadata": results, "client_timestamp": recv_timestamp}
+        perf_logger.info(json.dumps(log_obj))
  
 
 def main() -> None:
@@ -92,12 +138,42 @@ def main() -> None:
         action="store_true",
         help="Use h264 compression."
     )
+    parser.add_argument(
+        "-f",
+        "--fps",
+        type=float,
+        default=None,
+        help="Force given FPS"
+    )
+    parser.add_argument(
+        "-q",
+        "--queue_size",
+        type=int,
+        default=-1,
+        help="Overwrite remote queue size."
+    )
     parser.add_argument("-m", "--measuring", type=bool, help="Enable extended measuring logs", default=False)
     args = parser.parse_args()
     global verbose
     verbose = args.verbose
 
     logging.getLogger().setLevel(logging.INFO)
+
+    global measuring_data, measuring_items, measuring_prefix, perf_logger
+    if args.measuring:
+        measuring_data = Measuring(measuring_items, enabled=True, filename_prefix=measuring_prefix)
+
+        # Create also a logger file
+        time_stamp = datetime.now().strftime("%Y_%m_%d-%H_%M_%S_%f")
+        log_name = f"{time_stamp}_client_performace.log"
+        perf_logger = logging.getLogger(log_name)
+        # print only to file and do not propagate to parent loggers
+        perf_logger.propagate = False
+        f_handler = logging.FileHandler(log_name)
+        f_handler.setLevel(logging.INFO)
+        f_format = logging.Formatter("%(asctime)s: %(message)s")
+        f_handler.setFormatter(f_format)
+        perf_logger.addHandler(f_handler)
 
     global results_storage
     if args.no_results:
@@ -133,6 +209,8 @@ def main() -> None:
                 raise Exception("Cannot open video file")
             
         fps = cap.get(cv2.CAP_PROP_FPS)
+        if args.fps is not None:
+            fps = args.fps
 
         #cap.set(cv2.CAP_PROP_POS_MSEC, 9000)  # debug 
 
@@ -148,7 +226,10 @@ def main() -> None:
         if args.h264:
             channel_name = "image_h264"
             channel_type = ChannelType.H264
-        client.register(netapp_address)
+        init_control_cmd_args = None
+        if args.queue_size != -1:
+            init_control_cmd_args = {"queue_size": args.queue_size}
+        client.register(netapp_address, init_control_cmd_args)
 
         # create timer to ensure required fps speed of the sending loop
         logging.info(f"Using RateTimer with {fps} FPS.")
@@ -156,7 +237,7 @@ def main() -> None:
 
         while not stopped:
             ret, frame = cap.read()
-            timestamp = time.perf_counter_ns()
+            timestamp = time.time_ns()  #time.perf_counter_ns()
             if not ret:
                 break
 

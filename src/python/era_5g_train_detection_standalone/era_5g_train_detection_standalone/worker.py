@@ -31,17 +31,24 @@ class TrainDetectorWorker(Thread):
     the results.
     """
 
-    def __init__(self, image_queue: Queue, send_function: Callable[[Dict], None], sort_tracker_params=None, optical_flow_params=None, **kw):
+    def __init__(
+            self,
+            image_queue: Queue,
+            send_function: Callable[[Dict], None],
+            sort_tracker_params: Dict = None,
+            optical_flow_params: Dict = None,
+            log_img_size: bool = False,
+            **kw
+        ):
         """
         Constructor
 
         Args:
             image_queue (Queue): The queue with all to-be-processed images.
             send_function (Callable[[Dict], None]): Callback used to send results.
-            sort_tracker_params (dict, optional): Dictionary with 
-                optional SORT tracker parameters.
-            optical_flow_params (dict, optional): Dictionary with 
-                optional parameters for optical flow calculation.
+            sort_tracker_params (dict, optional): Dictionary with optional SORT tracker parameters.
+            optical_flow_params (dict, optional): Dictionary with optional parameters for optical flow calculation.
+            log_img_size (bool): Save the shape of received image and also send the information back to client.
         """
 
         super().__init__(**kw)
@@ -54,6 +61,8 @@ class TrainDetectorWorker(Thread):
         self.fps = 0.0 
 
         self.latency_measurements = LatencyMeasurements()
+        self.log_img_size = log_img_size
+        self.frame_size_logged = False
 
         # Variables for measuring processing speed
         self.proc_times_len = 10  # Number of measuements for averaging
@@ -99,6 +108,15 @@ class TrainDetectorWorker(Thread):
             if not metadata.get("decoded", True):
                 # Decode image
                 image = cv2.imdecode(image, cv2.IMREAD_COLOR)
+
+            # Frame size logging
+            if self.log_img_size:
+                metadata["recv_img_size"] = f"{image.shape}"
+                if not self.frame_size_logged:
+                    self.frame_size_logged = True  # Save file only for the first frame
+                    logging.debug(f"First image has size: {image.shape}")
+                    with open("./first_frame_size.log", "w") as f:
+                        f.write(f"{image.shape}")
             
             # Prepare dictionary with all data used during processing
             data = {"image": image}
@@ -148,14 +166,18 @@ class TrainDetectorWorker(Thread):
 
         # Send only the necessary data about movements (no images, etc.),
         # add timestamp to the results
-        r = {"timestamp": metadata["timestamp"],
+        r = {
+            "timestamp": metadata["timestamp"],
              "recv_timestamp": metadata["recv_timestamp"],
              "timestamp_before_process": metadata["timestamp_before_process"],
              "timestamp_after_process": metadata["timestamp_after_process"],
              "send_timestamp": send_timestamp,
              "movements": data["movements"], # list(dict("bbox": bbox, "moving": 0/1/-1))
                 # bbox is: x1, y1, x2, y2 (top-left bottom-right corners)
-            }
+        }
+
+        if self.log_img_size:
+            r["recv_img_size"] = metadata["recv_img_size"]
 
         self.send_function(r)
 
