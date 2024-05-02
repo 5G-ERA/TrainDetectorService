@@ -32,6 +32,7 @@ class Server(NetworkApplicationServer):
 
     def __init__(
         self,
+        log_img_size,
         *args,
         **kwargs,
     ) -> None:
@@ -51,6 +52,8 @@ class Server(NetworkApplicationServer):
             *args,
             **kwargs,
         )
+
+        self.log_img_size = log_img_size
 
         # The detector to be used.
         self.detector_threads: Dict[str, TrainDetectorWorker] = {}
@@ -157,7 +160,7 @@ class Server(NetworkApplicationServer):
             try:
                 # create worker and run it as thread, listening to image_queue
                 send_function = partial(self.send_data, event="results", sid=self.get_sid_of_data(eio_sid))
-                worker = TrainDetectorWorker(image_queue, send_function, name=f"Detector {eio_sid}", daemon=True)
+                worker = TrainDetectorWorker(image_queue, send_function, log_img_size=self.log_img_size, name=f"Detector {eio_sid}", daemon=True)
             except Exception as ex:
                 logger.error(f"Failed to create Detector: {repr(ex)}")
                 logger.error(traceback.format_exc())
@@ -236,7 +239,7 @@ def main():
     logger.info(f"The size of the queue set to: {NETAPP_INPUT_QUEUE}")
 
     # runs the flask server
-    server = Server(port=NETAPP_PORT, host="0.0.0.0", extended_measuring=args.measuring)
+    server = Server(port=NETAPP_PORT, host="0.0.0.0", extended_measuring=args.measuring, log_img_size=args.img_log)
 
     try:
         server.run_server()
