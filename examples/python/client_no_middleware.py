@@ -244,7 +244,8 @@ def main() -> None:
             if args.crop:
                 # Used for testing with raw fisheye images from BringAuto
                 #print(frame.shape) 720, 1280, 3
-                frame = frame[int(frame.shape[0]/4):int(frame.shape[0]*3/4), int(frame.shape[1]/2):, :]
+                # (crop copy is necessary to prevent long encoding times)
+                frame = np.copy(frame[int(frame.shape[0]/4):int(frame.shape[0]*3/4), int(frame.shape[1]/2):, :])
                 resized = frame
             else:
                 resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)
